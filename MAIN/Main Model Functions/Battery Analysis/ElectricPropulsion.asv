@@ -1,0 +1,29 @@
+function [T_available_N, P_shaft_W, P_electrical_W, eta_prop, eta_motor, eta_ESC, msgs] = ElectricPropulsion(Msn_Alt, Msn_Mach, Config_Row, Propulsion_Input, msgs)
+
+% Outputs
+%{
+    T_available_N: Total thrust available from all motors and propellers.
+    P_shaft_W: Total mechanical power delivered to the propellers.
+    P_electrical_W: Total electrical power drawn by the motors and ESCs, before the battery model's avionics and wiring overhead.
+    eta_prop: Propeller efficiency.
+    eta_motor: Motor efficiency.
+    eta_ESC: ESC efficiency.
+    msgs: Existing message/logging variable, retained for compatibility with your current aircraft model.
+%}
+
+%% Motor Inputs
+motor_kv = motor.Kv_rpmPerV;    % Motor speed constant Kv [RPM/V]
+R_drop = motor.R_ohm;           % Motor winding resistance [ohm]
+I0 = motor.I0_A;                % No-load current [A]
+Imax = motor.Imax_A;            % Max continuous current [A]
+Pmax = motor.Pmax_W;            % Maximum continuous power [W]
+Vmax = motor.Vmax_V;            % Maximum operating voltage [V]
+motor_mass = motor.mass_kg;     % Motor mass [kg]
+
+%% Propeller Inputs
+diameter = prop.D_m;    % Prop Diameter [m]
+pitch = prop.D_m;       % Prop Pitch [m]
+CT = prop.CT_data;      % Thrust coefficient data
+CP = prop.CP_data;      % Power coefficient data
+J = prop.J_data;        % Advance ratio data
+
