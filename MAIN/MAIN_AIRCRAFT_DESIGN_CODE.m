@@ -52,21 +52,21 @@ end
 Configuration_filename="ASEN4138_TestCases.xlsx";
 
 %Sizing Analysis
-W_crew = 300; %lb
-W_pay_fixed = 0; %lb
-W_pay_drop = 1000; %lb
-W0_guess=20000;
-config_row=1; %Geometric definition row number not including header (in design configuration spreadsheet file)
+W_crew = 0; %lb
+W_pay_fixed = 5; %lb
+W_pay_drop = 0; %lb
+W0_guess = 50;
+config_row=7; %Geometric definition row number not including header (in design configuration spreadsheet file)
 MissionProfile_filename="Mission_Profile_Template.xlsx";
-sheetnumber=3; %Mission profile sheet number (Mission_Profile_Template.xlsx)
-ProfileName="F-16";
+sheetnumber=7; %Mission profile sheet number (Mission_Profile_Template.xlsx)
+ProfileName="Albatross";
 writeFlag=true;
 displayFlag=true;% flag for displaying additional iteration and segment data
 
 %Point Performance
 Requirements_filename="Requirements_Input_Template.xlsx";
-sheetnumber_req=2;
-RequirementName="F-16_req";
+sheetnumber_req=6;
+RequirementName="Albatross";
 W_S_range = linspace(40,120,100);
 
 %%%%%%%%%%%%%%%%%%%END INPUTS%%%%%%%%%%%%%%%%%%
@@ -80,16 +80,31 @@ disp(DragPolar_Model(config_row,:))
 %%Mission Performance/Sizing Analysis
 MSN_Profile=Read_MSN_Profile(MissionProfile_filename,sheetnumber,ProfileName);
 [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,msgs]=sizing(MSN_Profile,config_row,W0_guess,Design_Input,Propulsion_Input,DragPolar_Model,WaveDrag_Data,W_crew,W_pay_fixed,W_pay_drop,msgs);
-[RangeFactor_Data,M_eval_range,Alt_eval_range,RF_W] = RangeFactor(config_row,FinalWeightData,Design_Input,Propulsion_Input,DragPolar_Model,WaveDrag_Data);
+% RangeFactor is a fuel-aircraft range-factor analysis based on TSFC/SFC.
+% Electric sizing returns energy fractions rather than fuel weights; a
+% fuel-based RangeFactor calculation is not physically meaningful here.
+if strcmp(string(Propulsion_Input.PropType(config_row)),"PROP_Electric")
+    RangeFactor_Data = [];
+    M_eval_range = [];
+    Alt_eval_range = [];
+    RF_W = [];
+    fprintf('[v8] Skipping legacy fuel-based RangeFactor for electric configuration.\n');
+else
+    [RangeFactor_Data,M_eval_range,Alt_eval_range,RF_W] = RangeFactor(config_row,FinalWeightData,Design_Input,Propulsion_Input,DragPolar_Model,WaveDrag_Data);
+end
 displaySizingData(displayFlag,W0,FinalSegmentData,FinalWeightData,IterationData,outputTable,MSN_Profile);
 outputfilename = writeSizingData(writeFlag,W0,FinalSegmentData,FinalWeightData,IterationData,outputTable,DragPolar_Model,ProfileName,codeversion,outputfolder);
 
 %%Point Performance Analysis
 Req_Input=Read_Requirements_Input(Requirements_filename,sheetnumber_req,RequirementName);
-msgs = point_performance(Design_Input,config_row,W0,Propulsion_Input,DragPolar_Model,WaveDrag_Data,outputTable,Req_Input,W_S_range,msgs);
+if strcmp(string(Propulsion_Input.PropType(config_row)),"PROP_Electric")
+    fprintf('[v10] Skipping fuel-based point-performance constraints; electric mission performance is evaluated with motor/battery feasibility.\n');
+else
+    msgs = point_performance(Design_Input,config_row,W0,Propulsion_Input,DragPolar_Model,WaveDrag_Data,outputTable,Req_Input,W_S_range,msgs);
+end
 
 writemsgs(msgs,outputfilename) %output warnings to output file
-
+%{
 %% PHASE 2 AND 3 - HIGHER ORDER OPENVSP ANALYSIS
 % OpenVSP Geometry & Aero Analysis Version 
 %Initialize Workspace
@@ -188,3 +203,4 @@ Req_Input=Read_Requirements_Input(Requirements_filename,sheetnumber_req,Requirem
 msgs = point_performance(Design_Input,Config,W0,Propulsion_Input,DragPolar_Model,WaveDrag_Data,outputTable,Req_Input,W_S_range,msgs);
 
 writemsgs(msgs,outputfilename) %output warnings to output file
+%}

@@ -72,6 +72,9 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,DragPola
     %Sweep = Design_Input.Sweep_w(Config);
     Thick_w = Design_Input.AirfoilThick_w(Config);
     PropType = Propulsion_Input.PropType{Config};
+    if strcmp(string(PropType),"PROP_Electric")
+        [Propulsion_Input, Battery_Chemistry, Battery_Options] = LoadElectricPropulsionData(Propulsion_Input); %#ok<NASGU>
+    end
 
     %% AIRCRAFT WEIGHT AND GEOMETRY INPUTS
 
@@ -139,7 +142,8 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,DragPola
 
     i = 1; %Weight iteration number initlization
 
-    while Diff_W0 >= Converge
+    MaxWeightIterations = 200;
+    while Diff_W0 >= Converge && i <= MaxWeightIterations
 
         %Calculate Aircraft Parameters & Empty Weight based on Total Weight
         %(W0) and statistical model
@@ -208,6 +212,10 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,DragPola
 
 
 
+    end
+
+    if Diff_W0 >= Converge
+        error('Aircraft weight sizing did not converge within %d iterations. Check propulsion feasibility, empty-weight fraction, and mission inputs.',MaxWeightIterations);
     end
 
     if strcmp(PropType,"PROP_Electric")

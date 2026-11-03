@@ -10,10 +10,18 @@ function  displaySizingData(FLAG,W0,FinalSegmentData,FinalWeightData,IterationDa
         disp(FinalWeightData)
         disp("================================================================================")
 
-        for i=1:length(FinalSegmentData)
+        % Electric sizing appends battery summary and iteration diagnostics
+        % after the mission legs. Do not index the leg table past its height.
+        nLeg = height(FinalWeightData);
+        for i=1:min(numel(FinalSegmentData),nLeg)
             disp(table2array(FinalWeightData(i,1)))
             disp(FinalSegmentData{i})
-
+        end
+        if numel(FinalSegmentData)>nLeg
+            disp('Electric battery and sizing diagnostics:')
+            for i=nLeg+1:numel(FinalSegmentData)
+                disp(FinalSegmentData{i})
+            end
         end
         disp("================================================================================")
         disp(outputTable)

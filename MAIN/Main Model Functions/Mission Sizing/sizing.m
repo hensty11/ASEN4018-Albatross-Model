@@ -84,7 +84,15 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,msgs]=si
     %Type of propulsion used in design. Only used to output final T/W or
     %P/W for specific configuration evaluated.  Fuel burn done in each
     %mission segment function.
-    PropType = Propulsion_Input.PropType(Config_Row); %Determine if jet or prop propulsion
+    PropType = Propulsion_Input.PropType(Config_Row);
+    if strcmp(string(PropType),"PROP_Electric")
+        [Propulsion_Input, Battery_Chemistry, Battery_Options] = LoadElectricPropulsionData(Propulsion_Input);
+        if isempty(Propulsion_Input.MotorData{Config_Row}) || isempty(Propulsion_Input.PropellerData{Config_Row})
+            error(['No motor/propeller data is mapped to the selected electric configuration row %d. ' ...
+                'Set Config_Row in MotorData and PropellerData sheets of ElectricPropulsion_Input_FilledTest.xlsx to %d.'], ...
+                Config_Row, Config_Row);
+        end
+    end %Determine if jet or prop propulsion
     %Jet Engine Values (if propellor propulsion, set all to zero)
     TA_mil_sl = Propulsion_Input.Number(Config_Row)*Propulsion_Input.TA_mil_sl(Config_Row); %Uninstalled Mil power total thrust at sea level (all engines)
     TA_AB_sl = Propulsion_Input.Number(Config_Row)*Propulsion_Input.TA_AB_sl(Config_Row); %Uninstalled AB power total thrust at sea level (all engines)
@@ -92,6 +100,10 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,msgs]=si
     %Prop Engine Values (if jet propulsion, set all to zero)
     PA_shp_sl = Propulsion_Input.Number(Config_Row)*Propulsion_Input.PA_shp_sl(Config_Row); %shaft horsepower from engine at sea level (hp) total (all engines)
     NumEng=Propulsion_Input.Number(Config_Row);
+    if strcmp(string(PropType),"PROP_Electric")
+        % Use the detailed motor continuous shaft-power rating for the statistical empty-weight model.
+        PA_shp_sl = Propulsion_Input.Number(Config_Row)*Propulsion_Input.MotorData{Config_Row}.Pmax_W/745.699872; % hp
+    end
 
 
     %% PACKAGE CONSTANTS AND ATMOSPHERE
@@ -105,7 +117,12 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,msgs]=si
 
     [a,c1,c2,c3,c4,c5,msgs]= WeightModel(PropType,ACType,msgs);
 
-    while Diff_W0 >= Converge
+    MaxWeightIterations = 200;
+    % v5: diagnostic history is kept separately from legacy IterationData.
+    % Columns: iteration, guess, empty, battery, calculated, relative error,
+    % mission energy, peak battery power, series cells, capacity Ah, final SOC.
+    electricDiagnosticHistory = nan(MaxWeightIterations,11);
+    while Diff_W0 >= Converge && i <= MaxWeightIterations
 
         %Calculate Aircraft Parameters & Empty Weight based on Total Weight
         %(W0) and statistical model
@@ -139,20 +156,60 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,msgs]=si
         %in the mission profile and calls different MSN_SEG functions based
         %on user inputs. Returns weight/battery mass fraction and debugging
         %data for each segment and each convergence iteration.
-        [W_Mat,BMF_Mat,DATA,msgs]=MSN_SEG_Handler(MSN_Profile,W0_guess,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs);
+        try
+            if strcmp(string(PropType),"PROP_Electric")
+                [W_Mat,BMF_Mat,DATA,msgs,mission,Battery_Results]=OptimizeElectricMissionBattery( ...
+                    MSN_Profile,W0_guess,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs,Battery_Chemistry,Battery_Options);
+            else
+                [W_Mat,BMF_Mat,DATA,msgs,mission]=MSN_SEG_Handler( ...
+                    MSN_Profile,W0_guess,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs);
+            end
+        catch missionError
+            if strcmp(string(PropType),"PROP_Electric")
+                fprintf(2,['v5 mission failure: iteration %d, W0 guess %.3f lb, ' ...
+                    'empty weight %.3f lb (fraction %.4f).\n'],i,W0_guess,We,We_W0);
+                fprintf(2,'Inspect climb thrust/propeller operating point before changing geometry.\n');
+            end
+            rethrow(missionError);
+        end
         config=Constants{1};
         PropType=Propulsion_Input.PropType(config);
-        if strcmp(PropType,"PROP_Electric")
-            BMF=sum(BMF_Mat);
-            W0_calc=(W_crew+W_pay_fixed)/(1-BMF-We_W0);
-            %% Calc Difference Between W0_guess and W0_calc
-            Diff_W0 = abs(W0_guess-W0_calc)/W0_guess;
-            IterationData(i,:)=[i,W0_calc,We,BMF]; %#ok<AGROW>
-            %% Next Iteration Update
+        if strcmp(string(PropType),"PROP_Electric")
+            % Propulsion model has supplied battery-side electrical power for every mission phase.
+            % v7: Battery_Results jointly optimized with motor/propeller voltage above.
+            v6PrintMissionBudget(mission,W0_guess,i,Battery_Options);
+            if ~isfield(Battery_Results,'passed') || ~Battery_Results.passed || ~isfinite(Battery_Results.mass_kg)
+                reason='BatteryRequirements did not find a feasible pack.';
+                if isfield(Battery_Results,'failureReason') && ~isempty(Battery_Results.failureReason), reason=Battery_Results.failureReason; end
+                error('Electric battery sizing failed at aircraft weight %.2f lb: %s',W0_guess,reason);
+            end
+            % v6: expose pack capacity, voltage sag and candidate constraints.
+            v6PrintBatteryBudget(Battery_Results, Battery_Chemistry, Battery_Options);
+            BatteryWeight_lb = Battery_Results.mass_kg*2.2046226218;
+            % Battery is a separately sized mass; it is not a mission burn fraction.
+            % Battery is accounted for explicitly. This assumes the empirical
+            % empty-weight estimate EXCLUDES battery mass. We cannot safely
+            % subtract an arbitrary battery fraction without calibrating the
+            % statistical regression to the original aircraft weight budget.
+            W0_calc = W_crew + W_pay_fixed + W_pay_drop + We + BatteryWeight_lb;
+            Diff_W0 = abs(W0_guess-W0_calc)/max(W0_guess,eps);
+            IterationData(i,:)=[i,W0_calc,We,BatteryWeight_lb]; %#ok<AGROW>
+            electricDiagnosticHistory(i,:)=[i,W0_guess,We,BatteryWeight_lb, ...
+                W0_calc,Diff_W0,Battery_Results.missionEnergy_Wh, ...
+                Battery_Results.peakPower_W,Battery_Results.nSeries, ...
+                Battery_Results.requiredCapacity_Ah,Battery_Results.finalSOC];
+            fprintf(['v5 sizing: We=%.2f lb (%.1f%%), battery=%.2f lb, ' ...
+                'Wcalc=%.2f lb, relErr=%.3f, mission=%.1f Wh, ' ...
+                'peak=%.0f W, pack=%dS %.2f Ah, finalSOC=%.3f\n'], ...
+                We,100*We_W0,BatteryWeight_lb,W0_calc,Diff_W0, ...
+                Battery_Results.missionEnergy_Wh,Battery_Results.peakPower_W, ...
+                Battery_Results.nSeries,Battery_Results.requiredCapacity_Ah, ...
+                Battery_Results.finalSOC);
+            if We_W0 >= 1
+                warning('v5: empirical empty weight fraction %.3f >= 1; check applicability of weight regression.',We_W0);
+            end
             i = i + 1;
             W0_guess = (W0_guess+W0_calc)/2;
-
-
         else
 
             W_f_total_used=sum(W_Mat(:,3)); %Total amount of fuel burned for mission
@@ -173,15 +230,24 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,msgs]=si
 
     end
 
+    if Diff_W0 >= Converge
+        error('Aircraft weight sizing did not converge within %d iterations. Check propulsion feasibility, empty-weight fraction, and mission inputs.',MaxWeightIterations);
+    end
+
     if strcmp(PropType,"PROP_Electric")
         W0=W0_calc;
-        FinalWeightData=[MSN_Profile.legtype',BMF_Mat'];
-        FinalWeightData=array2table(FinalWeightData);
-        FinalWeightData.Properties.VariableNames=["Leg Type","BMF"];
+        FinalWeightData=table(string(MSN_Profile.legtype(:)),BMF_Mat(:),'VariableNames',{'Leg Type','Mission Energy Fraction'});
 
         IterationData=array2table(IterationData);
-        IterationData.Properties.VariableNames=["Iteration Number","W0 [lb]","Empty Weight [lb]","BMF"];
+        IterationData.Properties.VariableNames=["Iteration Number","W0 [lb]","Empty Weight [lb]","Battery Weight [lb]"];
+        % Battery results are appended after the segment-level performance tables.
         FinalSegmentData=DATA;
+        FinalSegmentData{end+1}=Battery_Results;
+        diagNames={'Iteration','W0_guess_lb','EmptyWeight_lb','BatteryWeight_lb', ...
+            'W0_calculated_lb','RelativeError','MissionEnergy_Wh', ...
+            'PeakBatteryPower_W','SeriesCount','Capacity_Ah','FinalSOC'};
+        FinalSegmentData{end+1}=array2table(electricDiagnosticHistory(1:i-1,:), ...
+            'VariableNames',diagNames);
 
     else
         W0=W0_calc;
@@ -215,7 +281,7 @@ function [W0,FinalWeightData,IterationData,FinalSegmentData,outputTable,msgs]=si
         Power_Weight_Ratio =PA_shp_sl/W0_calc;
         % construct output table
         tableNames = {'W0(lb)', 'Battery Mass (lb)', 'We(lb)', 'Wing Loading(lb/ft^2)','P/W(hp/lb)'};
-        outputTable = table(W0_calc,BMF*W0_calc,We,WingLoading,Power_Weight_Ratio, 'VariableNames', tableNames);
+        outputTable = table(W0_calc,BatteryWeight_lb,We,WingLoading,Power_Weight_Ratio, 'VariableNames', tableNames);
     else
         %recalculate wing loading and thrust to weight ratio for final W0
         WingLoading = W0_calc/Sref;
@@ -243,3 +309,39 @@ end
 
 
 
+
+
+function v6PrintMissionBudget(mission, W0_lb, iteration, options)
+% v6 diagnostic only: no changes to physical equations or solver results.
+dt = mission.dt_s(:);
+p = mission.P_motor_W(:);
+e = dt .* p / 3600;
+fprintf('\n[v6] Mission budget: iteration %d, W0=%.3f lb\n',iteration,W0_lb);
+fprintf('  #  %-16s %12s %12s %12s %12s\n','Segment','Duration s','Motor W','Motor Wh','Cumul Wh');
+for k=1:numel(dt)
+    typ = string(mission.segmentType(k));
+    fprintf('  %2d %-16s %12.1f %12.1f %12.2f %12.2f\n',k,char(typ),dt(k),p(k),e(k),sum(e(1:k)));
+end
+fprintf('  TOTAL: duration=%.1f s, motor energy=%.2f Wh, peak motor=%.1f W\n',sum(dt),sum(e),max(p));
+if isfield(options,'P_avionics_W'), pa=options.P_avionics_W; else, pa=15; end
+if isfield(options,'wiringLossFraction'), loss=options.wiringLossFraction; else, loss=0.03; end
+if isfield(options,'energyMarginFactor'), margin=options.energyMarginFactor; else, margin=1.10; end
+pbat=(p+pa)./(1-loss);
+fprintf('  Estimated bus energy before margin=%.2f Wh, peak=%.1f W (avionics=%.1f W, wiring loss=%.3f)\n',sum(pbat.*dt)/3600,max(pbat),pa,loss);
+fprintf('  Battery sizing energy margin factor=%.4f (see BatteryRequirements for actual application)\n',margin);
+end
+
+function v6PrintBatteryBudget(b,chem,options)
+fprintf('[v6] Battery: mission=%.2f Wh, nominal pack=%.2f Wh, delivered=%.2f Wh, cell energy=%.2f Wh, resistive loss=%.2f Wh\n', ...
+    b.missionEnergy_Wh,b.nominalPackEnergy_Wh,b.energyDelivered_Wh,b.energyFromCells_Wh,b.resistiveLoss_Wh);
+fprintf('  Pack=%dS %.3f Ah, mass=%.3f kg, nominal V=%.2f, min terminal V=%.2f, cutoff V=%.2f, final SOC=%.4f\n', ...
+    b.nSeries,b.requiredCapacity_Ah,b.mass_kg,b.nominalPackVoltage_V,b.minimumTerminalVoltage_V,b.requiredCutoffVoltage_V,b.finalSOC);
+fprintf('  Peak=%.1f W, current=%.2f A, peak C=%.3f, RMS current=%.2f A; specific energy=%.1f Wh/kg\n', ...
+    b.peakPower_W,b.peakCurrent_A,b.peakC,b.rmsCurrent_A,chem.specificEnergy_Whkg);
+if isfield(b,'candidates') && istable(b.candidates)
+    disp('[v6] Battery series-count candidate feasibility:');
+    disp(b.candidates);
+end
+if isfield(chem,'minimumFinalSOC'), fprintf('  Minimum final SOC setting=%.4f\n',chem.minimumFinalSOC); end
+if isfield(chem,'usableCapacityFraction'), fprintf('  Usable capacity fraction=%.4f\n',chem.usableCapacityFraction); end
+end

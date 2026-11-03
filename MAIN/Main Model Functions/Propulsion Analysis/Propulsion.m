@@ -115,9 +115,22 @@ elseif strcmp(PropType,'PROP_Turbocharged') %Estimation of turbo-normalized pist
         SFC = SFC_sl*(1/3600)*(1/550); %Assumes SFC_sl initial provided in lb/hr/hp so must convert to lb/s/(ft*lb/s) using (550 ft*lb/s)/hp & 3600 s/hr.
     end
 elseif strcmp(PropType,'PROP_Electric')
-    P_lapse=PropEff;%corrects for propeller efficiency
-    PA_shp_sl = (745.7/550)*PA_shp_sl; %Shaft or brake horsepower for prop engine (converted from hp to watts). 
-    PA_max =PA_shp_sl*P_lapse;%*P_lapse;%includes number of engines (W)
+    % Detailed electric pathway. The mission-segment legacy interface asks
+    % for a single available-power value, so request an intentionally high
+    % thrust to make ElectricPropulsion return its highest-thrust feasible
+    % operating point. PA_max is the associated total shaft power [W].
+    if ~isfield(Propulsion_Input,'MotorData') || ~isfield(Propulsion_Input,'PropellerData')
+        error(['Electric propulsion data are not loaded. Call ', ...
+            'LoadElectricPropulsionData before mission sizing and populate ', ...
+            'the ElectricPropulsion_Input_Template.xlsx workbook.']);
+    end
+    [T_available_N,P_shaft_W,~,~,~,~,msgs,~,~,~] = ...
+        ElectricPropulsion(Msn_Alt,Msn_Mach,1e30,Config_Row,Propulsion_Input,msgs);
+    if T_available_N <= 0 || ~isfinite(P_shaft_W)
+        error('ElectricPropulsion found no feasible operating point at %.0f ft, Mach %.3f.',Msn_Alt,Msn_Mach);
+    end
+    PA_max = P_shaft_W; % [W], shaft power at max-thrust feasible point
+    P_lapse = NaN;      % no scalar lapse model in detailed electric pathway
 else
     error("Invalid PropType")
 end

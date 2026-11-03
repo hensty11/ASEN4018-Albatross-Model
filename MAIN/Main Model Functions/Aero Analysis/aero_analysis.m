@@ -114,7 +114,7 @@ Plot_WingGeo_Data = 0; %Set to 0 to suppress plots for this function or 1 to out
 
 %% Calculations - Lift and Drag
 % Call Wing Lift & Drag Model Function
-Plot_Wing_Data = 1; %Set to 0 to suppress plots for this function or 1 to output plots (Fig 200 - 299)
+Plot_Wing_Data = 0; %Set to 0 to suppress plots for this function or 1 to output plots (Fig 200 - 299)
 [WingLiftModel,AoA,AoA_Count,AirfoilLiftCurve,WingLiftCurve,WingDragCurve,msgs] =...
     WingLiftDrag(Design_Input,Airfoil,Count,Plot_Wing_Data,msgs);
 
@@ -138,7 +138,7 @@ Plot_DragPolar_Data = 1; %Set to 0 to suppress plots for this function or 1 to o
     DragPolar(Parasite_Drag_Data,InducedDrag_Data,WaveDrag_Data,Design_Input,AoA_Count,WingLiftCurve,WingDragCurve,AirfoilLiftCurve,Airfoil,Count,Plot_DragPolar_Data,msgs);
 
 %% Call L/D Analysis Function
-Plot_LD_Data = 1; %Set to 0 to suppress plots for this function or 1 to output plots (Fig 700 - 799)
+Plot_LD_Data = 0; %Set to 0 to suppress plots for this function or 1 to output plots (Fig 700 - 799)
 [LD_sub, LD_super, msgs] = ...
     LD(Design_Input,DragPolar_Subsonic,DragPolar_Supersonic_Max,WingLiftCurve,WingDragCurve,AoA_Count,Count,Plot_LD_Data,msgs);
 

@@ -1,79 +1,41 @@
-function [W_Mat,BMF_Mat,DATA,msgs] = MSN_SEG_Handler(MSN_Profile,W_start,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs)
-    %Author: Jonathan Morris
-    %ASEN 4138
-    %MSN_SEG_Handler interprets a MSN_Profile structure (defined by user in
-    %an excel spreadsheet, created by Read_MSN_Profile.m) and returns
-    %weight information/battery mass fraction for each mission segment.
-    %Also returns a DATA structure that contains relevant information for
-    %each mission segment (i.e cruise Drag and thrust available) useful for
-    %debugging.
-
-
-    %unpacking from structure
-    legnum=MSN_Profile.legnum;
-    input_table=MSN_Profile.input_table;
-    segment=MSN_Profile.legtype;
-
-    %initializing variables
-    W=W_start;
-    W_Mat=zeros(legnum,5);
-    config=Constants{1};
-    PropType=Propulsion_Input.PropType(config);
-    BMF_Mat=0;
-
-    if strcmp(PropType,"PROP_Electric") %ELECTRIC
-        for i=1:legnum %iterates through the given mission profile and calls the relevant MSN_SEG function for each legtype.
-            seg_inpt=input_table{i};%gets the row for the ith mission segment from the cell array of inputs.
-            %dropflag=false;% flag for when the drop payload segment is used. currently drop isn't implemented for electric aircraft.
-            switch segment(i)
-                case "Takeoff"
-                    [BMF,DATA{i},msgs]=MSN_SEG_TO_Elec(seg_inpt(1),seg_inpt(2),seg_inpt(3),seg_inpt(4),W,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs);
-                case "Climb"
-                    [BMF,DATA{i},msgs]=MSN_SEG_Climb_Elec(seg_inpt(1),seg_inpt(2),seg_inpt(3),seg_inpt(4),seg_inpt(5),W,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs);
-                case "Cruise"
-                    [BMF,DATA{i},msgs]=MSN_SEG_Cruise_Elec(seg_inpt(1),seg_inpt(2),seg_inpt(3),seg_inpt(4),W,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs);
-                case "Loiter"
-                    [BMF,DATA{i},msgs]=MSN_SEG_Loiter_Elec(seg_inpt(1),seg_inpt(2),seg_inpt(3),W,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs);
-                case "Startup/Taxi"
-                    BMF=seg_inpt(1);
-                    %Weight_Fraction=Wa_Wb;
-                    DATA{i}=table(BMF);
-                case "Descent"
-                    BMF=seg_inpt(1);
-                    %Weight_Fraction=Wa_Wb;
-                    DATA{i}=table(BMF);
-                case "Landing"
-                    BMF=seg_inpt(1);
-                    %Weight_Fraction=Wa_Wb;
-                    DATA{i}=table(BMF);
-                    %currently Dropping payload isn't implemented for
-                    %electric aircraft. Somewhat difficult to implement as we
-                    %return a BMF but the BMF is zero although the weight
-                    %decreases. Would have to return more variables from this
-                    %function to implement a drop
-                    %%%%%%%%%%%%
-                    %                 case "Drop"
-                    %                     BMF=(W-seg_inpt(1))/W;
-                    %                     dropflag=true;
-                    %                     Payload_Dropped=seg_inpt(1);
-                    %                     Weight_Fraction=Wa_Wb;
-                    %                     DATA{i}=table(Payload_Dropped,Weight_Fraction);
-                case "VTOL"
-                    error("VTOL currently not supported for electric aircraft!")
-
-                otherwise
-                    error("Uknown Mission Segment Type: "+segment(i));
-            end
-
-
-            BMF_Mat(i)=BMF;
-
-
-
+function [W_Mat,BMF_Mat,DATA,msgs,mission] = MSN_SEG_Handler(MSN_Profile,W_start,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs,busVoltageLimit_V)
+% Mission segment dispatcher. Electric aircraft use mission -> propeller/motor
+% operating points -> mission electrical power profile. Non-electric logic is
+% retained from the original model.
+if nargin < 9 || isempty(busVoltageLimit_V),busVoltageLimit_V=Inf;end
+legnum=MSN_Profile.legnum; input_table=MSN_Profile.input_table; segment=MSN_Profile.legtype;
+W=W_start; W_Mat=zeros(legnum,5); config=Constants{1}; PropType=string(Propulsion_Input.PropType{config});
+BMF_Mat=zeros(1,legnum); mission=struct('dt_s',[],'P_motor_W',[],'segmentType',strings(0,1),'segmentData',{{}},'Vmin_motor_V',[]);
+DATA=cell(1,legnum);
+if PropType=="PROP_Electric"
+    energyWh=zeros(1,legnum);
+    for i=1:legnum
+        seg_inpt=input_table{i}; segType=string(segment(i));
+        if segType=="Drop" || segType=="VTOL" || segType=="Air Refuel"
+            error('Electric integration currently does not support mission segment "%s". Update the segment template before running.',segType);
         end
-
-
-    else% NON-ELECTRIC
+        [seg,msgs]=EvaluateElectricMissionSegment(segType,seg_inpt,W,Constants,Propulsion_Input,DragPolar_Model,WaveDrag_Data,msgs,busVoltageLimit_V);
+        if ~seg.feasible
+            fprintf(2,'[v6] Failed segment %d (%s): duration=%.1f s, required thrust=%.2f N, available thrust=%.2f N, shaft=%.1f W, electrical=%.1f W\n', ...
+                i,char(segType),seg.duration_s,seg.T_required_N,seg.T_available_N,seg.P_shaft_W,seg.P_motor_W);
+            error('Electric mission segment %d (%s) is infeasible: %s',i,segType,seg.note);
+        end
+        if isfield(seg,'note') && ~isempty(seg.note)
+            msgs.warnings{end+1}=sprintf('Segment %d (%s): %s',i,segType,seg.note);
+        end
+        seg.ElectricalEnergy_Wh=seg.P_motor_W*seg.duration_s/3600;
+        DATA{i}=struct2table(seg,'AsArray',true);
+        mission.dt_s(end+1,1)=seg.duration_s; %#ok<AGROW>
+        mission.P_motor_W(end+1,1)=seg.P_motor_W; %#ok<AGROW>
+        mission.Vmin_motor_V(end+1,1)=seg.requiredMotorVoltage_V; %#ok<AGROW>
+        mission.segmentType(end+1,1)=segType; %#ok<AGROW>
+        mission.segmentData{end+1,1}=seg; %#ok<AGROW>
+        energyWh(i)=seg.ElectricalEnergy_Wh;
+        BMF_Mat(i)=0; % legacy column retained; battery mass is now calculated once per mission
+    end
+    totalE=sum(energyWh);
+    if totalE>0, BMF_Mat=energyWh/totalE; end % segment energy fractions for reporting only
+else% NON-ELECTRIC
         for i=1:legnum%iterates through the given mission profile and calls the relevant MSN_SEG function for each legtype.
             W_Mat(i,1)=W; %starting weight
             seg_inpt=input_table{i};%gets the row for the ith mission segment from the cell array of inputs.

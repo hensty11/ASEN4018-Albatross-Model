@@ -128,6 +128,11 @@ for j = 1:nC
     reasons{j} = reason;
     if ok
         cap(j) = capMin(j) * opt.energyMarginFactor;
+        % Quantize only if a VERIFIED physical cell capacity is supplied.
+        % A reference battery's pack Ah is not a cell-level discretization.
+        if isfield(chem,'referenceCellCapacity_Ah') && chem.referenceCellCapacity_Ah > 0
+            cap(j) = ceil(cap(j)/chem.referenceCellCapacity_Ah)*chem.referenceCellCapacity_Ah;
+        end
         sim = simulatePack(cap(j),NsCandidates(j),S,chem,opt);
         if sim.passed
             feasible(j) = true;
@@ -167,7 +172,20 @@ Results.fullChargeVoltage_V = Ns * chem.maxCellV;
 Results.requiredCutoffVoltage_V = max(VminReq,Ns * chem.minCellV);
 Results.minimumCapacity_Ah = capMin(bestIdx);
 Results.requiredCapacity_Ah = Q;
+if isfield(chem,'referenceCellCapacity_Ah') && chem.referenceCellCapacity_Ah > 0
+    Results.nParallel = round(Q/chem.referenceCellCapacity_Ah);
+else
+    Results.nParallel = NaN; % continuous-equivalent pack; physical cell count unknown
+end
 Results.requiredCapacity_mAh = 1000*Q;
+Results.capacityMode = 'continuous-equivalent (cell capacity not specified)';
+if isfield(chem,'referenceCellCapacity_Ah') && chem.referenceCellCapacity_Ah > 0
+    Results.capacityMode = 'integer physical-cell strings';
+end
+if isfield(chem,'referencePackCapacity_Ah') && chem.referencePackCapacity_Ah>0
+    Results.referencePackCapacity_Ah = chem.referencePackCapacity_Ah;
+    Results.equivalentReferencePackMultiples = Q / chem.referencePackCapacity_Ah;
+end
 Results.nominalPackEnergy_Wh = Results.nominalPackVoltage_V * Q;
 Results.mass_kg = mass(bestIdx);
 Results.volume_L = vol(bestIdx);
@@ -279,6 +297,8 @@ for k=1:n
     soc(k+1)=soc(k)-deltaAh/usableAh;
     if volt < max(S.Vmin(k),Ns*chem.minCellV)
         reason = 'Loaded voltage falls below the required bus voltage.';
+    elseif cur > Q*chem.ratedDischargeRate_C + 1e-8
+        reason = 'Continuous current exceeds chemistry rated C-rate.';
     elseif soc(k+1) < chem.minimumFinalSOC
         reason = 'Estimated capacity is insufficient to complete the mission with the SOC reserve.';
     end

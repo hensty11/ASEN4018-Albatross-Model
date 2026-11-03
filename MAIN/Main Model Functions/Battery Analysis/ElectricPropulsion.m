@@ -1,7 +1,7 @@
 function [T_available_N, P_shaft_W, P_electrical_W, ...
     eta_prop, eta_motor, eta_ESC, msgs, RPM_operating, ...
-    T_operating_N, feasible] = ElectricPropulsion( ...
-    Msn_Alt_ft, Msn_Mach, T_required_N, Config_Row, Propulsion_Input, msgs)
+    T_operating_N, feasible, requiredMotorVoltage_V] = ElectricPropulsion( ...
+    Msn_Alt_ft, Msn_Mach, T_required_N, Config_Row, Propulsion_Input, msgs, busVoltageLimit_V)
 % ELECTRICPROPULSION
 % Finds a motor/propeller operating point for one mission segment.
 %
@@ -53,6 +53,11 @@ eta_ESC = NaN;
 RPM_operating = NaN;
 T_operating_N = 0;
 feasible = false;
+requiredMotorVoltage_V = NaN;
+if nargin < 7 || isempty(busVoltageLimit_V), busVoltageLimit_V = Inf; end
+if ~(isscalar(busVoltageLimit_V) && busVoltageLimit_V > 0)
+    error('busVoltageLimit_V must be positive.');
+end
 
 if nargin < 6 || isempty(msgs)
     msgs.warnings = {};
@@ -73,7 +78,7 @@ motor = getConfigData(Propulsion_Input.MotorData, Config_Row);
 prop = getConfigData(Propulsion_Input.PropellerData, Config_Row);
 numUnits = Propulsion_Input.Number(Config_Row);
 
-if isfield(Propulsion_Input, 'eta_ESC')
+if ismember('eta_ESC', Propulsion_Input.Properties.VariableNames)
     eta_ESC = getConfigValue(Propulsion_Input.eta_ESC, Config_Row);
 else
     eta_ESC = 0.95; % Typical initial estimate for a brushless ESC
@@ -146,7 +151,7 @@ if ~isfinite(rho) || rho <= 0 || ~isfinite(V)
     error('Atmosphere model returned invalid density or flight speed.');
 end
 
-rpmMax = Kv * Vmax; % approximate no-load RPM limit
+rpmMax = Kv * min(Vmax,busVoltageLimit_V); % approximate no-load RPM limit
 
 %% Build candidate propeller operating points
 % For forward flight, search the tabulated advance-ratio range. RPM follows
@@ -224,7 +229,7 @@ for k = 1:numel(rpmCandidate)
 
     % Candidate is only acceptable if continuous operating limits are met.
     motorOK = rpm <= rpmMax && ...
-        Imotor <= Imax && Vmotor <= Vmax && ...
+        Imotor <= Imax && Vmotor <= Vmax && Vmotor <= busVoltageLimit_V && ...
         PshaftProp <= Pmax && PmotorElectrical > 0 && ...
         etaMotorCandidate > 0 && etaMotorCandidate <= 1.05;
 
@@ -236,6 +241,7 @@ for k = 1:numel(rpmCandidate)
     if Tprop > bestThrust
         bestThrust = Tprop;
         bestThrustData.rpm = rpm;
+        bestThrustData.Vmotor = Vmotor;
         bestThrustData.Tprop = Tprop;
         bestThrustData.Pshaft = PshaftProp;
         bestThrustData.Pelectrical = PescElectrical;
@@ -247,6 +253,7 @@ for k = 1:numel(rpmCandidate)
     if Tprop * numUnits >= T_required_N && PescElectrical < bestPower
         bestPower = PescElectrical;
         bestRequiredData.rpm = rpm;
+        bestRequiredData.Vmotor = Vmotor;
         bestRequiredData.Tprop = Tprop;
         bestRequiredData.Pshaft = PshaftProp;
         bestRequiredData.Pelectrical = PescElectrical;
@@ -279,6 +286,7 @@ else
     return
 end
 
+requiredMotorVoltage_V = selected.Vmotor;
 RPM_operating = selected.rpm;
 T_operating_N = selected.Tprop * numUnits;
 P_shaft_W = selected.Pshaft * numUnits;
